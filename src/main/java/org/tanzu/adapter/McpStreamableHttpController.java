@@ -19,7 +19,7 @@ import java.util.Map;
  * security validation, and protocol compliance.
  */
 @RestController
-@RequestMapping("/")
+@RequestMapping("/mcp")
 public class McpStreamableHttpController {
 
     private static final Logger logger = LoggerFactory.getLogger(McpStreamableHttpController.class);
@@ -44,7 +44,7 @@ public class McpStreamableHttpController {
      * @param origin The Origin header for security validation
      * @return ResponseEntity with NDJSON streaming response
      */
-    @PostMapping(value = "/")
+    @PostMapping
     public ResponseEntity<Flux<String>> handlePostRequest(
             @RequestBody String jsonRpcMessage,
             @RequestHeader(value = "MCP-Protocol-Version", required = false) String protocolVersion,

@@ -13,7 +13,7 @@ applications:
 
     # Health check configuration
     health-check-type: http
-    health-check-http-endpoint: /health
+    health-check-http-endpoint: /mcp/health
 
     # Environment variables
     env:
