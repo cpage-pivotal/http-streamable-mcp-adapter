@@ -28,7 +28,7 @@ mcp:
       required-env-vars: []
 
   streamable:
-    endpoint: "/"
+    endpoint: "/mcp"
     protocol-version: "2025-06-18"
     session-timeout: ${STREAMABLE_SESSION_TIMEOUT:300}s
     max-concurrent-sessions: ${STREAMABLE_MAX_SESSIONS:100}
