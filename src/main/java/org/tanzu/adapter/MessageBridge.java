@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -13,13 +12,13 @@ import reactor.core.publisher.Mono;
 import jakarta.annotation.PostConstruct;
 
 /**
- * Message Bridge component that translates between SSE transport and STDIO transport.
+ * Message Bridge component that translates between HTTP Streamable transport and STDIO transport.
  *
  * This implementation ensures MCP protocol compliance by:
  * - Validating JSON-RPC message format before forwarding
- * - Handling bidirectional message flow between SSE clients and STDIO server
+ * - Handling bidirectional message flow between HTTP clients and STDIO server
  * - Providing health monitoring and error handling
- * - Managing connection-aware message bridging
+ * - Managing reactive message bridging
  */
 @Component
 public class MessageBridge {
@@ -29,22 +28,18 @@ public class MessageBridge {
     @Autowired
     private McpServerProcess mcpServerProcess;
 
-    @Autowired
-    private SseSessionManager sseSessionManager;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @PostConstruct
     public void init() {
-        // Start bridging server-to-client messages only when there are active sessions
-        // This is more efficient than auto-subscribing regardless of connections
-        bridgeServerToClientWhenNeeded();
+        logger.info("MessageBridge initialized for HTTP Streamable transport");
     }
 
     /**
      * Bridges client messages to the MCP Server with full validation.
      *
-     * @param clientMessage JSON-RPC message from SSE client
+     * @param clientMessage JSON-RPC message from HTTP client
      * @return Mono that completes when message is successfully sent
      */
     public Mono<Void> bridgeClientToServer(String clientMessage) {
@@ -67,44 +62,18 @@ public class MessageBridge {
     }
 
     /**
-     * Bridges server messages to SSE clients.
+     * Bridges server messages to HTTP clients via reactive streams.
      * This method creates a reactive stream that forwards messages from the MCP Server
-     * to all connected SSE sessions.
+     * to HTTP Streamable clients.
      *
-     * @return Flux of ServerSentEvent objects for SSE transport
+     * @return Flux of String messages for HTTP Streamable transport
      */
-    public Flux<ServerSentEvent<String>> bridgeServerToClient() {
+    public Flux<String> bridgeServerToClient() {
         return mcpServerProcess.getMessages()
                 .doOnNext(message -> logger.debug("Bridging server message to clients: {}", message))
-                .doOnNext(message -> {
-                    // Send to all active SSE sessions
-                    sseSessionManager.sendToAllSessions(message);
-                })
-                .map(message -> ServerSentEvent.<String>builder()
-                        .event("message")
-                        .data(message)
-                        .build())
                 .onErrorContinue((error, obj) -> {
                     logger.error("Error bridging server message to client: {}", obj, error);
                 });
-    }
-
-    /**
-     * Connection-aware server-to-client bridging.
-     * Only maintains the bridge when there are active SSE sessions.
-     */
-    private void bridgeServerToClientWhenNeeded() {
-        // Monitor session count and manage bridge lifecycle
-        Flux.interval(java.time.Duration.ofSeconds(5))
-                .filter(tick -> sseSessionManager.getActiveSessionCount() > 0)
-                .take(1) // Take only the first tick when sessions become active
-                .flatMap(tick -> bridgeServerToClient())
-                .repeat() // Restart monitoring when bridge completes
-                .subscribe(
-                        event -> {}, // Events are handled in bridgeServerToClient
-                        error -> logger.error("Error in connection-aware bridging", error),
-                        () -> logger.debug("Server-to-client bridge completed")
-                );
     }
 
     /**
@@ -182,22 +151,12 @@ public class MessageBridge {
     }
 
     /**
-     * Gets the current number of active SSE sessions.
-     * Useful for monitoring and health checks.
-     *
-     * @return number of active sessions
-     */
-    public int getActiveSessionCount() {
-        return sseSessionManager.getActiveSessionCount();
-    }
-
-    /**
      * Manual method to start server-to-client bridging.
-     * Can be called when the first SSE client connects.
+     * Can be called when HTTP Streamable clients connect.
      *
-     * @return Flux of server-sent events
+     * @return Flux of messages
      */
-    public Flux<ServerSentEvent<String>> startBridging() {
+    public Flux<String> startBridging() {
         logger.info("Starting manual server-to-client message bridging");
         return bridgeServerToClient();
     }
@@ -211,7 +170,6 @@ public class MessageBridge {
         return java.util.Map.of(
                 "mcpServerRunning", isHealthy(),
                 "mcpServerName", mcpServerProcess.getConfig().getName(),
-                "activeSessionCount", getActiveSessionCount(),
                 "bridgeStatus", isHealthy() ? "healthy" : "unhealthy"
         );
     }

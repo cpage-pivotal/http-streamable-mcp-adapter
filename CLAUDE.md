@@ -4,21 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Spring Boot 3.5.4 application that serves as a Protocol Adapter for bridging SSE (Server-Sent Events) transport to STDIO transport for the GitHub MCP Server. The application is designed for Cloud Foundry deployment as a Docker image.
+This is a Spring Boot 3.5.4 application that serves as a Protocol Adapter for bridging HTTP Streamable transport to STDIO transport for MCP Servers. The application is designed for Cloud Foundry deployment as a Docker image.
 
 ## Architecture
 
-The adapter acts as a bridge between MCP clients using SSE transport and the GitHub MCP Server using STDIO transport:
+The adapter acts as a bridge between MCP clients using HTTP Streamable transport and MCP Servers using STDIO transport:
 
 ```
-MCP Client (SSE) ↔ Protocol Adapter (Spring Boot) ↔ GitHub MCP Server (STDIO)
+MCP Client (HTTP Streamable) ↔ Protocol Adapter (Spring Boot) ↔ MCP Server (STDIO)
 ```
 
 Key components (fully implemented):
-- **SSE Endpoint Controller** (`McpSseController`): Handles HTTP/SSE connections at `/sse` and `/message` endpoints
-- **MCP Server Process Manager** (`McpServerProcess`): Manages GitHub MCP Server process lifecycle
-- **Message Bridge** (`MessageBridge`): Translates between SSE and STDIO message formats
-- **Session Manager** (`SseSessionManager`): Handles SSE client connections and routing
+- **HTTP Streamable Controller** (`McpStreamableHttpController`): Handles POST endpoint with NDJSON streaming responses
+- **MCP Server Process Manager** (`McpServerProcess`): Manages MCP Server process lifecycle
+- **Streamable Bridge** (`StreamableBridge`): Translates between HTTP Streamable and STDIO message formats
+- **Request Context Manager** (`RequestContextManager`): Handles request correlation and context management
 - **Configuration** (`config/McpServerConfig`, `config/EnvironmentVariableProcessor`): Server configuration and environment processing
 
 ## Development Commands
@@ -78,18 +78,32 @@ The project uses Spring WebFlux for reactive web programming and Jackson for JSO
 ### Key Configuration Properties
 ```yaml
 mcp:
-  github:
-    executable: ./bin/github-mcp-server    # Path to GitHub MCP Server binary
-    args: ["stdio"]                        # Arguments for the server
-    environment:
-      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
-      GITHUB_HOST: ${GITHUB_HOST:https://github.com}
-      GITHUB_TOOLSETS: ${GITHUB_TOOLSETS:repos,issues,pull_requests,users,code_security,secret_protection,notifications}
-  sse:
-    max-connections: ${MAX_SSE_CONNECTIONS:100}
-    message-buffer-size: ${MESSAGE_BUFFER_SIZE:1000}
-  process:
-    restart-delay-ms: ${PROCESS_RESTART_DELAY_MS:5000}
+  server:
+    name: ${MCP_SERVER_NAME}
+    description: ${MCP_SERVER_DESCRIPTION}
+    executable: ${MCP_SERVER_EXECUTABLE}
+    args: ${MCP_SERVER_ARGS}
+    working-directory: ${MCP_SERVER_WORKDIR:.}
+    process:
+      restart-enabled: ${MCP_PROCESS_RESTART_ENABLED:true}
+      restart-delay-ms: ${MCP_PROCESS_RESTART_DELAY_MS:5000}
+      health-check-enabled: ${MCP_PROCESS_HEALTH_CHECK_ENABLED:true}
+      health-check-interval-ms: ${MCP_PROCESS_HEALTH_CHECK_INTERVAL_MS:30000}
+      startup-timeout-ms: ${MCP_PROCESS_STARTUP_TIMEOUT_MS:60000}
+    validation:
+      required-env-vars: []
+
+  streamable:
+    endpoint: "/"
+    protocol-version: "2025-06-18"
+    session-timeout: ${STREAMABLE_SESSION_TIMEOUT:300}s
+    max-concurrent-sessions: ${STREAMABLE_MAX_SESSIONS:100}
+    response-timeout: ${STREAMABLE_RESPONSE_TIMEOUT:30}s
+    max-responses-per-request: ${STREAMABLE_MAX_RESPONSES:100}
+    security:
+      validate-origin: ${STREAMABLE_VALIDATE_ORIGIN:true}
+      allowed-origins: ["localhost", "127.0.0.1"]
+      require-protocol-version: ${STREAMABLE_REQUIRE_PROTOCOL:false}
 ```
 
 ## Project Structure
@@ -98,10 +112,11 @@ mcp:
 src/
 ├── main/java/org/tanzu/adapter/
 │   ├── AdapterApplication.java          # Main Spring Boot application
-│   ├── McpSseController.java           # SSE endpoints (/sse, /message, /health)
+│   ├── McpStreamableHttpController.java # HTTP Streamable endpoints (POST /, /health)
 │   ├── McpServerProcess.java           # MCP Server process management
-│   ├── MessageBridge.java              # Protocol translation and validation
-│   ├── SseSessionManager.java          # SSE session lifecycle management
+│   ├── StreamableBridge.java           # HTTP Streamable to STDIO protocol translation
+│   ├── RequestContextManager.java      # Request correlation and context management
+│   ├── SecurityValidator.java          # Origin and protocol version validation
 │   └── config/
 │       ├── EnvironmentVariableProcessor.java # Environment variable processing
 │       └── McpServerConfig.java        # MCP server configuration
@@ -118,10 +133,11 @@ src/
 ✅ **FULLY IMPLEMENTED** - The application is complete and production-ready with:
 
 ### Core Components (Implemented)
-- **`McpSseController`**: REST endpoints for SSE connections, message handling, and health checks
+- **`McpStreamableHttpController`**: REST endpoint for HTTP Streamable transport with NDJSON streaming
 - **`McpServerProcess`**: Complete process lifecycle management with MCP STDIO compliance
-- **`MessageBridge`**: Full JSON-RPC validation and bidirectional message translation
-- **`SseSessionManager`**: UUID-based session management with reactive streams
+- **`StreamableBridge`**: Full JSON-RPC validation and bidirectional message translation
+- **`RequestContextManager`**: Request correlation and context management for streaming responses
+- **`SecurityValidator`**: Origin validation and MCP protocol version checking
 - **Configuration Classes**: Centralized configuration management and environment variable processing
 
 ### Key Features
@@ -130,39 +146,41 @@ src/
 - **JSON-RPC Validation**: Complete message format validation
 - **Process Management**: Automatic restart capabilities
 - **Health Monitoring**: Real-time status endpoints
-- **Session Management**: UUID-based SSE connection tracking
+- **HTTP Streamable Protocol**: NDJSON streaming responses with request correlation
 
 ## API Endpoints
 
-- **`GET /sse`** - Server-Sent Events connection endpoint
-- **`POST /message`** - JSON-RPC message submission
+- **`POST /`** - HTTP Streamable endpoint for JSON-RPC messages with NDJSON streaming responses
 - **`GET /health`** - Application health status
-- **`GET /debug/process`** - GitHub MCP Server process status
+- **`GET /debug/process`** - MCP Server process status
 
 ## Environment Requirements
 
 - Java 21 runtime
-- GitHub MCP Server binary at `bin/github-mcp-server`
-- Environment variables for GitHub authentication:
-  - `GITHUB_PERSONAL_ACCESS_TOKEN` (required)
-  - `GITHUB_HOST` (optional, defaults to https://github.com)
-  - `GITHUB_TOOLSETS` (optional, defaults to common toolsets)
+- MCP Server binary (configured via `MCP_SERVER_EXECUTABLE`)
+- Environment variables for MCP server configuration:
+  - `MCP_SERVER_NAME` - Name of the MCP server
+  - `MCP_SERVER_DESCRIPTION` - Description of the MCP server
+  - `MCP_SERVER_EXECUTABLE` - Path to the MCP server binary
+  - `MCP_SERVER_ARGS` - Arguments for the MCP server (comma-separated)
+  - Additional environment variables specific to the MCP server being used
 - Cloud Foundry deployment environment
 
 ## Testing
 
-The application provides health endpoints for testing:
+The application provides endpoints for testing:
 ```bash
 # Test health
 curl http://localhost:8080/health
 
-# Test SSE connection
-curl -N -H "Accept: text/event-stream" http://localhost:8080/sse
-
-# Send JSON-RPC message
+# Test HTTP Streamable endpoint with NDJSON streaming
 curl -X POST -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2025-06-18" \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}' \
-  http://localhost:8080/message
+  http://localhost:8080/
+
+# Test debug endpoint
+curl http://localhost:8080/debug/process
 ```
 
 ## Deployment

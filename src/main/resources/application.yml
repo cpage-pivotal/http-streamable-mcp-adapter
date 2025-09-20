@@ -38,12 +38,3 @@ mcp:
       validate-origin: ${STREAMABLE_VALIDATE_ORIGIN:true}
       allowed-origins: ["localhost", "127.0.0.1"]
       require-protocol-version: ${STREAMABLE_REQUIRE_PROTOCOL:false}
-    sse:
-      event-id-prefix: "mcp"
-      heartbeat-interval: ${STREAMABLE_HEARTBEAT:30}s
-      resumability-enabled: ${STREAMABLE_RESUMABLE:true}
-
-  # Keep existing SSE config for backward compatibility during transition
-  sse:
-    max-connections: ${MAX_SSE_CONNECTIONS:100}
-    message-buffer-size: ${MESSAGE_BUFFER_SIZE:1000}
