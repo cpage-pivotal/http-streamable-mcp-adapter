@@ -1,0 +1,158 @@
+# ==============================================================================
+# Generic MCP Protocol Adapter - Base Image
+# ==============================================================================
+# This base image contains the generic protocol adapter that can work with any
+# STDIO-based MCP server. Specific MCP server implementations should extend
+# this base image and add their server binary.
+
+FROM --platform=linux/amd64 maven:3.9-eclipse-temurin-21 AS spring-boot-builder
+
+# Set the working directory
+WORKDIR /build
+
+# Copy Maven files first for better caching
+COPY pom.xml ./
+COPY .mvn .mvn/
+COPY mvnw mvnw.cmd ./
+
+# Make mvnw executable
+RUN chmod +x mvnw
+
+# Download dependencies (cached layer)
+RUN --mount=type=cache,target=/root/.m2 \
+    ./mvnw dependency:go-offline -B
+
+# Copy source code
+COPY src ./src/
+
+# Build the Spring Boot application
+RUN --mount=type=cache,target=/root/.m2 \
+    ./mvnw clean package -DskipTests -B
+
+# ==============================================================================
+# Base Runtime Image
+# ==============================================================================
+FROM --platform=linux/amd64 eclipse-temurin:21-jre-alpine
+
+# Install required packages
+RUN apk add --no-cache \
+    bash \
+    curl \
+    file \
+    && rm -rf /var/cache/apk/*
+
+# Create app directory
+WORKDIR /app
+
+# Create non-root user for security
+RUN addgroup -g 1000 appuser && \
+    adduser -D -s /bin/bash -u 1000 -G appuser appuser
+
+# Copy Spring Boot JAR from builder stage
+COPY --from=spring-boot-builder /build/target/adapter-*.jar ./protocol-adapter.jar
+
+# Copy application configuration
+COPY src/main/resources/application.yml ./application.yml
+
+# Create bin directory for MCP server binaries (to be added by extending images)
+RUN mkdir -p ./bin && chown appuser:appuser ./bin
+
+# Create generic startup script for any MCP server
+RUN cat << 'EOF' > start.sh
+#!/bin/bash
+set -e
+
+echo "=== Generic MCP Protocol Adapter Startup ==="
+echo "Platform: $(uname -m)"
+echo "Java Version: $(java -version 2>&1 | head -1)"
+
+# Configuration validation
+echo "Configuration:"
+echo "  MCP Server Name: ${MCP_SERVER_NAME:-not-set}"
+echo "  MCP Server Executable: ${MCP_SERVER_EXECUTABLE:-not-set}"
+echo "  MCP Server Args: ${MCP_SERVER_ARGS:-not-set}"
+echo "  Port: ${PORT:-8080}"
+
+# Validate that MCP server configuration is provided
+if [ -z "$MCP_SERVER_NAME" ]; then
+    echo "ERROR: MCP_SERVER_NAME environment variable is required"
+    echo "This should be set by the extending Docker image or at runtime"
+    exit 1
+fi
+
+if [ -z "$MCP_SERVER_EXECUTABLE" ]; then
+    echo "ERROR: MCP_SERVER_EXECUTABLE environment variable is required"
+    echo "This should be set by the extending Docker image or at runtime"
+    exit 1
+fi
+
+# Validate that the MCP server binary exists
+if [ ! -f "$MCP_SERVER_EXECUTABLE" ]; then
+    echo "ERROR: MCP server binary not found at: $MCP_SERVER_EXECUTABLE"
+    echo "Make sure the extending Docker image adds the MCP server binary"
+    exit 1
+fi
+
+# Check binary architecture and permissions
+echo "Checking MCP server binary..."
+file "$MCP_SERVER_EXECUTABLE"
+if [ ! -x "$MCP_SERVER_EXECUTABLE" ]; then
+    echo "ERROR: MCP server binary is not executable"
+    exit 1
+fi
+
+# Test the MCP server binary (optional)
+if [ "${VALIDATE_MCP_SERVER:-false}" = "true" ]; then
+    echo "Validating MCP server binary..."
+    if timeout 5 "$MCP_SERVER_EXECUTABLE" --help > /dev/null 2>&1; then
+        echo "MCP server binary validation successful"
+    else
+        echo "WARNING: MCP server binary validation failed or timed out"
+    fi
+fi
+
+# Set JVM options for Cloud Foundry and containerized environments
+JVM_OPTS="${JVM_OPTS:-}"
+JVM_OPTS="$JVM_OPTS -XX:+UseContainerSupport"
+JVM_OPTS="$JVM_OPTS -XX:MaxRAMPercentage=75.0"
+JVM_OPTS="$JVM_OPTS -Djava.security.egd=file:/dev/./urandom"
+
+echo "=== Starting Generic MCP Protocol Adapter ==="
+echo "JVM Options: $JVM_OPTS"
+
+# Start the Spring Boot application with dynamic configuration
+exec java $JVM_OPTS \
+    -Dspring.config.additional-location=./application.yml \
+    -Dserver.port=${PORT:-8080} \
+    -Dlogging.level.root=${LOG_LEVEL:-INFO} \
+    -Dmcp.server.name="$MCP_SERVER_NAME" \
+    -Dmcp.server.executable="$MCP_SERVER_EXECUTABLE" \
+    -Dmcp.server.args="$MCP_SERVER_ARGS" \
+    -jar protocol-adapter.jar
+EOF
+
+# Make startup script executable
+RUN chmod +x start.sh
+
+# Health check - works with any MCP server
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
+
+# Change ownership to non-root user
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose the port
+EXPOSE 8080
+
+# Set environment variables with defaults (to be overridden by extending images)
+ENV MCP_SERVER_NAME="" \
+    MCP_SERVER_EXECUTABLE="" \
+    MCP_SERVER_ARGS="" \
+    LOG_LEVEL="INFO" \
+    PORT="8080"
+
+# Set the entrypoint
+ENTRYPOINT ["./start.sh"]

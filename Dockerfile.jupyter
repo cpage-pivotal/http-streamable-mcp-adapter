@@ -1,0 +1,163 @@
+# ==============================================================================
+# JupyterLab MCP Protocol Adapter - FIXED VERSION
+# ==============================================================================
+# This image extends the generic MCP protocol adapter base image and adds
+# the JupyterLab MCP Server implementation
+
+# ==============================================================================
+# Stage 1: Download JupyterLab MCP Server
+# ==============================================================================
+FROM --platform=linux/amd64 alpine:latest AS jupyterlab-mcp-downloader
+ARG JUPYTERLAB_MCP_REPO="https://github.com/cpage-pivotal/jupyterlab-mcp-server"
+ARG JUPYTERLAB_MCP_BRANCH="main"
+
+WORKDIR /download
+
+# Install git and download the repository
+RUN apk add --no-cache git && \
+    git clone --depth 1 --branch ${JUPYTERLAB_MCP_BRANCH} ${JUPYTERLAB_MCP_REPO} . && \
+    ls -la && \
+    # Verify the main script exists
+    test -f jupyterlab_remote_mcp.py && \
+    echo "JupyterLab MCP Server downloaded successfully"
+
+# ==============================================================================
+# Stage 2: Final JupyterLab MCP Adapter Image
+# ==============================================================================
+FROM us-docker.pkg.dev/cf-mcp/gcr.io/mcp-adapter-base:latest
+
+USER root
+
+# Install Python 3 and required packages (use apk packages to avoid library conflicts)
+RUN apk add --no-cache \
+        python3 \
+        py3-pip \
+        py3-setuptools \
+        py3-wheel \
+        && \
+    # Install Python dependencies using pip3
+    pip3 install --break-system-packages --no-cache-dir \
+        mcp \
+        httpx \
+        && \
+    # Create python symlink
+    ln -sf python3 /usr/bin/python
+
+# Copy the MCP server script
+COPY --from=jupyterlab-mcp-downloader /download/jupyterlab_remote_mcp.py ./bin/jupyterlab_remote_mcp.py
+
+# Create the wrapper executable that the base adapter expects
+RUN cat << 'EOF' > ./bin/jupyterlab-mcp-server
+#!/bin/bash
+set -e
+exec python3 /app/bin/jupyterlab_remote_mcp.py "$@"
+EOF
+
+# Make everything executable and test
+RUN chmod +x ./bin/jupyterlab_remote_mcp.py && \
+    chmod +x ./bin/jupyterlab-mcp-server && \
+    # Verify Python works properly
+    python3 --version && \
+    python3 -c "import mcp, httpx, asyncio; print('Dependencies OK')" && \
+    # Verify wrapper script works
+    echo "Testing wrapper script..." && \
+    file ./bin/jupyterlab-mcp-server
+
+# Create JupyterLab-specific startup script
+RUN cat << 'EOF' > start-jupyterlab.sh
+#!/bin/bash
+set -e
+
+echo "=== JupyterLab MCP Protocol Adapter Startup ==="
+echo "Platform: $(uname -m)"
+echo "Python Version: $(python3 --version 2>&1 || echo 'Python not found')"
+
+# Validate JupyterLab configuration
+echo "JupyterLab Configuration:"
+echo "  JupyterLab URL: ${JUPYTER_URL:-https://cf-jupyter-uv.apps.tas-ndc.kuhn-labs.com}"
+echo "  Notebook Path: ${NOTEBOOK_PATH:-nbsample.ipynb}"
+echo "  Provider: ${PROVIDER:-jupyter}"
+
+# Verify Python dependencies
+echo "Verifying Python environment..."
+if python3 -c "import mcp, httpx, asyncio" 2>/dev/null; then
+    echo "Python dependencies verified successfully"
+else
+    echo "ERROR: Required Python dependencies not available"
+    exit 1
+fi
+
+# Verify the MCP server wrapper exists and is executable
+if [ ! -f "./bin/jupyterlab-mcp-server" ]; then
+    echo "ERROR: JupyterLab MCP Server wrapper not found at ./bin/jupyterlab-mcp-server"
+    exit 1
+fi
+
+if [ ! -x "./bin/jupyterlab-mcp-server" ]; then
+    echo "ERROR: JupyterLab MCP Server wrapper is not executable"
+    exit 1
+fi
+
+echo "Testing JupyterLab MCP Server wrapper..."
+if [ -x "./bin/jupyterlab-mcp-server" ]; then
+    echo "JupyterLab MCP Server wrapper is executable and ready"
+else
+    echo "ERROR: JupyterLab MCP Server wrapper is not executable"
+    exit 1
+fi
+
+# Optional: Test JupyterLab connectivity
+if [ "${VALIDATE_JUPYTER_CONNECTION:-false}" = "true" ]; then
+    echo "Testing JupyterLab connectivity..."
+    JUPYTER_TEST_URL="${JUPYTER_URL:-https://cf-jupyter-uv.apps.tas-ndc.kuhn-labs.com}"
+    if timeout 10 curl -s -f "$JUPYTER_TEST_URL/api/kernels" > /dev/null 2>&1; then
+        echo "JupyterLab connectivity test successful"
+    else
+        echo "WARNING: JupyterLab connectivity test failed - server may not be accessible"
+        echo "The adapter will still start, but MCP operations may fail"
+    fi
+fi
+
+echo "=== Configuring Generic MCP Adapter ==="
+
+# CRITICAL: Set configuration for the base image (SINGLE SOURCE OF TRUTH)
+export MCP_SERVER_NAME="jupyterlab-mcp-server"
+export MCP_SERVER_EXECUTABLE="./bin/jupyterlab-mcp-server"
+export MCP_SERVER_ARGS=""
+
+# Configure environment variable passthrough for Spring Boot
+export MCP_SERVER_ENVIRONMENT_PASSTHROUGH_0_SOURCE="JUPYTER_URL"
+export MCP_SERVER_ENVIRONMENT_PASSTHROUGH_1_SOURCE="NOTEBOOK_PATH"
+export MCP_SERVER_ENVIRONMENT_PASSTHROUGH_2_SOURCE="PROVIDER"
+
+echo "Final MCP Configuration:"
+echo "  MCP_SERVER_NAME: $MCP_SERVER_NAME"
+echo "  MCP_SERVER_EXECUTABLE: $MCP_SERVER_EXECUTABLE"
+echo "  MCP_SERVER_ARGS: '$MCP_SERVER_ARGS'"
+
+echo "=== Delegating to Base Image Startup Script ==="
+
+# Call the base image startup script (handles all the generic logic)
+exec /app/start.sh
+EOF
+
+RUN chmod +x start-jupyterlab.sh
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+# Set ONLY JupyterLab-specific defaults that users might want to override
+ENV JUPYTER_URL="https://cf-jupyter-uv.apps.tas-ndc.kuhn-labs.com" \
+    NOTEBOOK_PATH="nbsample.ipynb" \
+    PROVIDER="jupyter" \
+    VALIDATE_JUPYTER_CONNECTION="false" \
+    LOG_LEVEL="INFO"
+
+# Use JupyterLab-specific startup script
+ENTRYPOINT ["./start-jupyterlab.sh"]
+
+# Labels for identification
+LABEL org.opencontainers.image.title="JupyterLab MCP Protocol Adapter"
+LABEL org.opencontainers.image.description="Protocol adapter for JupyterLab MCP Server with SSE transport"
+LABEL mcp.server.type="jupyterlab"
+LABEL mcp.server.url="https://github.com/cpage-pivotal/jupyterlab-mcp-server"JUPYTER_URL

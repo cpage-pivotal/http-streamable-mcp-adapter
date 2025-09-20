@@ -1,0 +1,32 @@
+server:
+  port: ${PORT:8080}
+  
+spring:
+  webflux:
+    base-path: /
+    
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    
+mcp:
+  server:
+    name: ${MCP_SERVER_NAME}
+    description: ${MCP_SERVER_DESCRIPTION}
+    executable: ${MCP_SERVER_EXECUTABLE}
+    # MCP_SERVER_ARGS supports comma-separated values for multiple arguments
+    # Examples: "stdio" or "stdio,--config,config.json" or "stdio,--format,json"
+    args: ${MCP_SERVER_ARGS}
+    working-directory: ${MCP_SERVER_WORKDIR:.}
+    process:
+      restart-enabled: ${MCP_PROCESS_RESTART_ENABLED:true}
+      restart-delay-ms: ${MCP_PROCESS_RESTART_DELAY_MS:5000}
+      health-check-enabled: ${MCP_PROCESS_HEALTH_CHECK_ENABLED:true}
+      health-check-interval-ms: ${MCP_PROCESS_HEALTH_CHECK_INTERVAL_MS:30000}
+      startup-timeout-ms: ${MCP_PROCESS_STARTUP_TIMEOUT_MS:60000}
+    validation:
+      required-env-vars: []
+
+  sse:
+    max-connections: ${MAX_SSE_CONNECTIONS:100}
+    message-buffer-size: ${MESSAGE_BUFFER_SIZE:1000}

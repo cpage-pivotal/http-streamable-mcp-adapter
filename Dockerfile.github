@@ -1,0 +1,109 @@
+# ==============================================================================
+# GitHub MCP Protocol Adapter
+# ==============================================================================
+# This image extends the generic MCP protocol adapter base image and adds
+# the GitHub MCP Server implementation
+
+# Stage 1: Build GitHub MCP Server
+FROM --platform=linux/amd64 golang:1.24.4-alpine AS github-mcp-builder
+ARG VERSION="dev"
+
+WORKDIR /build
+RUN --mount=type=cache,target=/var/cache/apk apk add git
+RUN git clone https://github.com/github/github-mcp-server.git .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=$(git rev-parse HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -o /bin/github-mcp-server cmd/github-mcp-server/main.go
+
+RUN file /bin/github-mcp-server && \
+    /bin/github-mcp-server --version || echo "GitHub MCP Server built successfully"
+
+# ==============================================================================
+# Stage 2: Final GitHub MCP Adapter Image
+# ==============================================================================
+FROM us-docker.pkg.dev/cf-mcp/gcr.io/mcp-adapter-base:latest
+
+USER root
+
+# Copy GitHub MCP Server binary
+COPY --from=github-mcp-builder /bin/github-mcp-server ./bin/github-mcp-server
+RUN chmod +x ./bin/github-mcp-server
+
+# Verify binary
+RUN file ./bin/github-mcp-server && \
+    ./bin/github-mcp-server --version || echo "GitHub MCP Server installed successfully"
+
+# Create simplified GitHub-specific startup script
+RUN cat << 'EOF' > start-github.sh
+#!/bin/bash
+set -e
+
+echo "=== GitHub MCP Protocol Adapter Startup ==="
+echo "Platform: $(uname -m)"
+
+if [ -z "$GITHUB_PERSONAL_ACCESS_TOKEN" ]; then
+    echo "ERROR: GITHUB_PERSONAL_ACCESS_TOKEN environment variable is required"
+    echo "Set it with: cf set-env <app-name> GITHUB_PERSONAL_ACCESS_TOKEN 'your-token'"
+    exit 1
+fi
+
+echo "GitHub Configuration:"
+echo "  GitHub Host: ${GITHUB_HOST:-https://github.com}"
+echo "  GitHub Toolsets: ${GITHUB_TOOLSETS:-repos,issues,pull_requests,users,code_security,secret_protection,notifications}"
+
+# Validate GitHub MCP Server binary exists
+if [ ! -f "./bin/github-mcp-server" ]; then
+    echo "ERROR: GitHub MCP Server binary not found"
+    exit 1
+fi
+
+# Optional: Validate GitHub token
+if [ "${VALIDATE_GITHUB_TOKEN:-false}" = "true" ]; then
+    echo "Validating GitHub token..."
+    if curl -s -f -H "Authorization: token $GITHUB_PERSONAL_ACCESS_TOKEN" https://api.github.com/user > /dev/null; then
+        echo "GitHub token validation successful"
+    else
+        echo "WARNING: GitHub token validation failed"
+    fi
+fi
+
+echo "=== Configuring Generic MCP Adapter ==="
+
+# Set configuration for the base image (SINGLE SOURCE OF TRUTH)
+export MCP_SERVER_NAME="github-mcp-server"
+export MCP_SERVER_EXECUTABLE="./bin/github-mcp-server"
+export MCP_SERVER_ARGS="stdio"
+
+# Configure environment variable passthrough for Spring Boot
+export MCP_SERVER_ENVIRONMENT_PASSTHROUGH_0_SOURCE="GITHUB_PERSONAL_ACCESS_TOKEN"
+export MCP_SERVER_ENVIRONMENT_PASSTHROUGH_1_SOURCE="GITHUB_HOST"
+export MCP_SERVER_ENVIRONMENT_PASSTHROUGH_2_SOURCE="GITHUB_TOOLSETS"
+
+echo "=== Delegating to Base Image Startup Script ==="
+
+# Call the base image startup script (handles all the generic logic)
+exec /app/start.sh
+EOF
+
+RUN chmod +x start-github.sh
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+# Set ONLY GitHub-specific defaults that users might want to override
+# These are the ONLY environment variables we set (no duplication)
+ENV GITHUB_HOST="https://github.com" \
+    GITHUB_TOOLSETS="repos,issues,pull_requests,users,code_security,secret_protection,notifications" \
+    VALIDATE_GITHUB_TOKEN="false" \
+    LOG_LEVEL="INFO"
+
+# Use GitHub-specific startup script
+ENTRYPOINT ["./start-github.sh"]
+
+# Labels for identification
+LABEL org.opencontainers.image.title="GitHub MCP Protocol Adapter"
+LABEL org.opencontainers.image.description="Protocol adapter for GitHub MCP Server with SSE transport"
+LABEL mcp.server.type="github"
+LABEL mcp.server.version="${VERSION}"

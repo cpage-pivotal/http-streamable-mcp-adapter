@@ -1,0 +1,76 @@
+# Exclude files not needed in Docker build context
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+DESIGN.md
+CLAUDE.md
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Maven
+target/
+.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# Logs
+*.log
+logs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Cloud Foundry
+manifest.yml
+.cf/
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Test files and test output
+src/test/
+TEST-*.xml
+*.test
+
+# Local environment files
+.env
+.env.local
+.env.*.local
+
+# Spring Boot
+application-local.yml
+application-dev.yml
+
+bin/

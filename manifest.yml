@@ -1,0 +1,35 @@
+---
+# Cloud Foundry Manifest for GitHub MCP Protocol Adapter
+# Deploys as a Docker image with required environment variables and configuration
+
+applications:
+  - name: github-mcp-adapter
+    docker:
+      image: us-docker.pkg.dev/cf-mcp/gcr.io/github-mcp-adapter:latest
+
+    memory: 1G
+    disk_quota: 512M
+    instances: 1
+
+    # Health check configuration
+    health-check-type: http
+    health-check-http-endpoint: /health
+
+    # Environment variables
+    env:
+
+      # Required: GitHub Personal Access Token
+      GITHUB_PERSONAL_ACCESS_TOKEN: ((github-token))
+
+      # GitHub configuration
+      GITHUB_HOST: https://github.com
+      GITHUB_TOOLSETS: repos,issues,pull_requests,users,code_security,secret_protection,notifications
+
+      # Optional: Application configuration
+      LOG_LEVEL: INFO
+      MAX_SSE_CONNECTIONS: 100
+      MESSAGE_BUFFER_SIZE: 1000
+      PROCESS_RESTART_DELAY_MS: 5000
+
+      # Spring Boot configuration
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics
