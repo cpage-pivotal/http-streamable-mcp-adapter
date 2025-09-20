@@ -2,12 +2,12 @@
 
 ## Executive Summary
 
-This document outlines the design and implementation plan for modifying the existing MCP Protocol Adapter to support **Streamable HTTP transport** instead of SSE (Server-Sent Events) transport. The adapter will continue to bridge to STDIO transport for MCP servers but will now accept Streamable HTTP requests and provide streaming HTTP responses.
+This document outlines the design and implementation of the MCP Protocol Adapter supporting **MCP Streamable HTTP transport** with full compliance to the specification. The adapter bridges between HTTP clients using either JSON or SSE transport and STDIO transport for MCP servers.
 
-## Implementation Status ✅ CORE PHASES COMPLETED
+## Implementation Status ✅ FULLY COMPLIANT & COMPLETE
 
 **✅ Phase 1: Core Infrastructure Changes** - COMPLETED
-- `McpStreamableHttpController.java` - Single endpoint streamable HTTP controller
+- `McpStreamableHttpController.java` - Dual endpoint HTTP controller (GET/POST)
 - `RequestContextManager.java` - Request correlation and timeout management
 - `StreamableBridge.java` - Streamable HTTP to STDIO bridge
 
@@ -16,97 +16,179 @@ This document outlines the design and implementation plan for modifying the exis
 - Response streaming logic with correlation
 - Stream termination and timeout management
 
-**⏳ Phase 3: Spring WebFlux Configuration** - READY (using defaults)
-**⏳ Phase 4: Refactoring & Cleanup** - PENDING (remove SSE components)
-**⏳ Phase 5: Testing & Validation** - PENDING
+**✅ Phase 3: MCP Compliance Implementation** - COMPLETED
+- `SecurityValidator.java` - Origin and protocol version validation
+- `SessionManager.java` - WebFlux reactive session management
+- `MessageProcessor.java` - Content negotiation and 202 responses
+- `SseMessageFormatter.java` - Proper SSE event formatting
 
-The core streamable HTTP functionality is now fully implemented and operational.
+**✅ Phase 4: Spring WebFlux Configuration** - COMPLETED
+**✅ Phase 5: Testing & Validation** - COMPLETED
+
+The adapter now **fully complies** with the MCP Streamable HTTP transport specification.
 
 ## Current vs Target Architecture
 
-### Current Architecture (SSE → STDIO)
+### Implemented Architecture (MCP Streamable HTTP ↔ STDIO)
 ```
-┌─────────────────┐      SSE Connection     ┌──────────────────┐      STDIO      ┌─────────────────┐
+┌─────────────────┐     GET/POST + Headers  ┌──────────────────┐      STDIO      ┌─────────────────┐
 │   MCP Client    │ ◄───────────────────► │Protocol Adapter  │ ◄────────────► │  MCP Server     │
-│ (SSE Transport) │   POST /message        │  (Spring Boot)   │    Process     │(STDIO Transport)│
-└─────────────────┘                        └──────────────────┘                └─────────────────┘
+│(JSON/SSE HTTP) │   Content Negotiation   │  (Spring Boot)   │    Process     │(STDIO Transport)│
+└─────────────────┘   Security Validation   └──────────────────┘                └─────────────────┘
 ```
 
-### Target Architecture (Streamable HTTP → STDIO)
-```
-┌─────────────────┐    HTTP POST + Stream   ┌──────────────────┐      STDIO      ┌─────────────────┐
-│   MCP Client    │ ◄───────────────────► │Protocol Adapter  │ ◄────────────► │  MCP Server     │
-│(Streamable HTTP)│  Streaming Response    │  (Spring Boot)   │    Process     │(STDIO Transport)│
-└─────────────────┘                        └──────────────────┘                └─────────────────┘
-```
+**Key Features:**
+- **Dual Transport**: Supports both JSON and SSE responses based on Accept header
+- **Security**: Origin validation and MCP-Protocol-Version header support
+- **Compliance**: 202 responses for notifications, proper SSE formatting
+- **Session Management**: UUID-based sessions with reactive streams
 
-## Streamable HTTP Transport Specification
+## MCP Streamable HTTP Transport Specification - IMPLEMENTED ✅
 
-Based on the MCP specification, Streamable HTTP transport has these key characteristics:
+The adapter implements the full MCP Streamable HTTP transport specification:
 
-1. **Single Endpoint**: All communication happens through a single HTTP endpoint
-2. **Request/Response Pattern**: Client sends JSON-RPC messages via HTTP POST
-3. **Streaming Responses**: Server responds with a stream of newline-delimited JSON-RPC messages
-4. **Multiple Responses**: A single request can trigger multiple response messages
-5. **Chunked Transfer**: Uses HTTP chunked transfer encoding or HTTP/2 server push
-6. **Stateless**: No persistent connection or session management required
+### **✅ Core Features Implemented:**
+1. **Dual HTTP Methods**: Both GET (SSE) and POST (JSON/SSE) endpoints
+2. **Content Negotiation**: Automatic selection between JSON and SSE based on Accept header
+3. **Security Headers**: Origin validation and MCP-Protocol-Version support
+4. **Proper Status Codes**: 202 Accepted for notifications/responses, appropriate error codes
+5. **SSE Compliance**: Proper Server-Sent Events formatting with id, event, data fields
+6. **Session Management**: UUID-based sessions for SSE connections with timeout
 
-## Design Changes Required
+### **✅ HTTP Endpoints:**
+- `POST /` - JSON-RPC messages with content negotiation (JSON or SSE response)
+- `GET /` - Server-Sent Events connections for server-to-client streaming
+- `GET /health` - Health check with session and server status
+- `GET /debug/*` - Debug endpoints for troubleshooting
 
-### 1. Controller Changes
+### **✅ Header Support:**
+- `Accept`: Content negotiation (application/json vs text/event-stream)
+- `Origin`: CORS validation for browser security
+- `MCP-Protocol-Version`: Protocol version validation (2025-06-18, 2025-03-26)
+- `Mcp-Session-Id`: Session management for SSE connections
+- `Last-Event-ID`: SSE resumption support
 
-#### Remove SSE Components
-- **Remove**: `/sse` endpoint
-- **Remove**: SSE session management
-- **Remove**: Endpoint event mechanism
+## ✅ Implementation Complete - Key Components
 
-#### New Streamable HTTP Endpoint
+### 1. **McpStreamableHttpController** - Compliance Controller ✅
+
+Fully compliant MCP Streamable HTTP controller with both endpoints:
+
 ```java
 @RestController
 @RequestMapping("/")
 public class McpStreamableHttpController {
-    
-    @PostMapping(value = "/", produces = MediaType.APPLICATION_NDJSON_VALUE)
-    public Flux<String> handleStreamableRequest(
+
+    // POST endpoint with content negotiation
+    @PostMapping(value = "/")
+    public ResponseEntity<?> handlePostRequest(
         @RequestBody String jsonRpcMessage,
-        ServerHttpRequest request,
-        ServerHttpResponse response
+        @RequestHeader("Accept") String acceptHeader,
+        @RequestHeader("MCP-Protocol-Version") String protocolVersion,
+        @RequestHeader("Mcp-Session-Id") String sessionId,
+        @RequestHeader("Origin") String origin
+    )
+
+    // GET endpoint for SSE connections
+    @GetMapping(value = "/", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public ResponseEntity<Flux<ServerSentEvent<String>>> handleGetRequest(
+        @RequestHeader("Accept") String acceptHeader,
+        @RequestHeader("MCP-Protocol-Version") String protocolVersion,
+        @RequestHeader("Mcp-Session-Id") String sessionId,
+        @RequestHeader("Last-Event-ID") String lastEventId,
+        @RequestHeader("Origin") String origin
     )
 }
 ```
 
-### 2. Session Management Changes
+### 2. **SessionManager** - WebFlux Reactive Sessions ✅
 
-#### Current: SseSessionManager
-- Manages persistent SSE connections
-- Tracks sessions with UUIDs
-- Routes messages to specific sessions
+WebFlux-based session management with reactive streams:
 
-#### New: Request Context Manager
-- Lightweight request tracking
-- Correlates responses to requests
-- No persistent sessions needed
-- Request-scoped lifecycle
+```java
+@Component
+public class SessionManager {
+    // UUID-based sessions with reactive Sinks
+    private final Map<String, McpSession> activeSessions;
 
-### 3. Message Bridge Changes
+    public Flux<String> getMessageStream(String sessionId)
+    public boolean sendMessage(String sessionId, String message)
+    public int broadcastMessage(String message)
+    public void terminateSession(String sessionId)
+}
+```
 
-#### Current: MessageBridge
-- Bridges between SSE events and STDIO
-- Manages session-aware routing
-- Handles connection lifecycle
+### 3. **SecurityValidator** - Compliance Validation ✅
 
-#### New: StreamableBridge
-- Bridges between Streamable HTTP and STDIO
-- Request/response correlation
-- Stream management for multiple responses
-- Timeout handling for streaming responses
+Security validation for MCP protocol compliance:
 
-### 4. Response Streaming Architecture
+```java
+@Component
+public class SecurityValidator {
+    public boolean validateOrigin(String origin)
+    public boolean validateProtocolVersion(String version)
+    // Supports: localhost, 127.0.0.1, private networks
+    // Versions: 2025-06-18, 2025-03-26
+}
+```
+
+### 4. **MessageProcessor** - Content Negotiation ✅
+
+Handles different message types and content negotiation:
+
+```java
+@Service
+public class MessageProcessor {
+    public ResponseEntity<?> processMessage(String message, String acceptHeader, String sessionId)
+    // Returns 202 for notifications/responses
+    // Content negotiation for JSON vs SSE
+    // Background processing for streaming
+}
+```
+
+### 5. **SseMessageFormatter** - SSE Compliance ✅
+
+Proper Server-Sent Events formatting:
+
+```java
+public class SseMessageFormatter {
+    public static String formatSseEvent(String eventType, String data, String id)
+    public static String formatJsonRpcSseEvent(String jsonRpcMessage, String eventId)
+    public static String createHeartbeatEvent()
+    public static String createConnectionEvent(String sessionId)
+}
+```
+
+## ✅ Current Architecture Flow
 
 ```
-Client Request → Controller → StreamableBridge → MCP Server Process
-                                    ↓
-Client ← Streaming Response ← Response Aggregator ← STDIO Output
+┌─────────────────┐    POST/GET + Headers    ┌──────────────────┐
+│   MCP Client    │ ────────────────────────► │SecurityValidator │
+│                 │                           │                  │
+│ Accept: JSON/SSE│ ◄──── 403/400/202/OK ──── │Origin + Protocol │
+└─────────────────┘                           └──────────────────┘
+                                                        │
+                                                        ▼
+                                              ┌──────────────────┐
+                                              │MessageProcessor  │
+                                              │                  │
+                                              │Content Negotiation│
+                                              └──────────────────┘
+                                                        │
+                                      ┌─────────────────┴─────────────────┐
+                                      ▼                                   ▼
+                              ┌──────────────┐                   ┌──────────────┐
+                              │JSON Response │                   │SSE Stream    │
+                              │(Single)      │                   │(Multi/Session│
+                              └──────────────┘                   └──────────────┘
+                                      │                                   │
+                                      └─────────────────┬─────────────────┘
+                                                        ▼
+                                              ┌──────────────────┐      STDIO      ┌─────────────────┐
+                                              │StreamableBridge  │ ◄────────────► │  MCP Server     │
+                                              │Request/Response  │    Process     │(STDIO Transport)│
+                                              │Correlation       │                └─────────────────┘
+                                              └──────────────────┘
 ```
 
 ## Implementation Plan
@@ -452,48 +534,65 @@ curl -X POST http://localhost:8080/ \
 | 2-3 | Refactoring | Remove SSE, simplify architecture |
 | 3 | Testing & Validation | Complete test suite, performance validation |
 
-## Implementation Summary ✅ COMPLETED
+## Implementation Summary ✅ FULLY COMPLIANT & COMPLETE
 
-The core migration from SSE to Streamable HTTP transport has been **successfully implemented** with the following key components:
+The MCP Streamable HTTP transport implementation is now **fully compliant** with the specification and includes all required compliance features:
 
-### New Components Created
-1. **`McpStreamableHttpController.java`** - Streamable HTTP endpoint controller
-   - Single POST endpoint at root path (`/`)
-   - NDJSON streaming responses with proper headers
-   - Comprehensive error handling
+### ✅ Compliance Components Implemented
+1. **`McpStreamableHttpController.java`** - Dual endpoint HTTP controller
+   - Both GET (SSE) and POST (JSON/SSE) endpoints at root path (`/`)
+   - Full header validation and content negotiation
+   - Security validation and proper status codes
 
-2. **`RequestContextManager.java`** - Request correlation manager
-   - JSON-RPC ID-based correlation
-   - 30-second timeout management
-   - Reactive streams for response aggregation
+2. **`SecurityValidator.java`** - Protocol compliance validation
+   - Origin header validation for CORS security
+   - MCP-Protocol-Version header support (2025-06-18, 2025-03-26)
+   - Localhost and private network validation
 
-3. **`StreamableBridge.java`** - Protocol bridge implementation
-   - Request/response correlation logic
+3. **`SessionManager.java`** - WebFlux reactive session management
+   - UUID-based SSE sessions with reactive streams
+   - Session timeout and cleanup management
+   - Message broadcasting and routing
+
+4. **`MessageProcessor.java`** - Content negotiation and message handling
+   - 202 Accepted responses for notifications/responses
+   - Content negotiation between JSON and SSE
+   - Background processing for streaming responses
+
+5. **`SseMessageFormatter.java`** - SSE compliance formatting
+   - Proper Server-Sent Events with id, event, data fields
+   - Connection events and heartbeat support
+   - Error event formatting
+
+6. **`StreamableBridge.java`** - Enhanced protocol bridge (existing)
+   - Request/response correlation maintained
    - Multi-response support per request
-   - Server-to-client message routing
+   - JSON-RPC validation and error handling
 
-### Key Features Implemented
-- ✅ **Stateless Architecture**: No persistent sessions, request-scoped lifecycle
-- ✅ **Streaming Responses**: Full NDJSON streaming with chunked transfer encoding
-- ✅ **Request Correlation**: JSON-RPC ID matching for response routing
-- ✅ **Multiple Responses**: Support for single request → multiple responses
-- ✅ **Timeout Management**: Automatic cleanup after 30 seconds
-- ✅ **Error Handling**: Comprehensive JSON-RPC error responses
-- ✅ **Health Monitoring**: Updated health endpoints for streamable transport
+### ✅ Full MCP Compliance Features
+- **✅ Dual HTTP Methods**: GET (SSE) and POST (JSON/SSE) endpoints
+- **✅ Content Negotiation**: Accept header-based response format selection
+- **✅ Security Headers**: Origin validation and protocol version support
+- **✅ Proper Status Codes**: 202 for notifications, 403 for security violations
+- **✅ SSE Compliance**: Proper event formatting with resumption support
+- **✅ Session Management**: UUID sessions with reactive streaming
+- **✅ WebFlux Integration**: Full reactive streams implementation
 
 ### Architecture Achievement
 ```
-✅ IMPLEMENTED: MCP Client (Streamable HTTP) ↔ Protocol Adapter ↔ MCP Server (STDIO)
+✅ FULLY COMPLIANT: MCP Client (JSON/SSE HTTP) ↔ Protocol Adapter ↔ MCP Server (STDIO)
 ```
 
-## Conclusion
+## Conclusion - Full MCP Streamable HTTP Compliance ✅
 
-The migration from SSE to Streamable HTTP transport has been **successfully implemented**. The adapter architecture is now simplified while improving compatibility and scalability. The implementation maintains full backward compatibility with STDIO-based MCP servers while providing a standard HTTP interface for clients.
+The adapter now **fully implements the MCP Streamable HTTP transport specification** with complete compliance to all requirements. The implementation supports both JSON and SSE transports with proper content negotiation, security validation, and protocol compliance.
 
-**Achieved advantages:**
-- ✅ Simpler, stateless architecture (no session management)
-- ✅ Better HTTP semantics and compatibility (standard POST/response)
-- ✅ Improved scalability and resource usage (request-scoped)
-- ✅ Standard request/response pattern with streaming support
+**✅ Compliance Achievements:**
+- **Full Protocol Support**: Both GET/POST methods with proper headers
+- **Security Compliance**: Origin validation and protocol version checks
+- **Content Negotiation**: Automatic JSON vs SSE selection
+- **SSE Compliance**: Proper Server-Sent Events formatting and session management
+- **Status Code Compliance**: 202 for notifications, appropriate error codes
+- **WebFlux Reactive**: Modern reactive streams implementation
 
-**Status:** Core implementation completed in Phase 1-2. Ready for Phase 4 (SSE cleanup) and Phase 5 (testing) when needed.
+**Status:** Implementation is **production-ready** and **fully compliant** with MCP Streamable HTTP specification. All phases completed including compliance fixes per COMPLIANCE.md requirements.
