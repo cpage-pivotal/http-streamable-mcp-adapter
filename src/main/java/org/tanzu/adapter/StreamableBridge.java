@@ -6,10 +6,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 
 import jakarta.annotation.PostConstruct;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Streamable Bridge component that translates between Streamable HTTP transport and STDIO transport.
@@ -270,5 +277,142 @@ public class StreamableBridge {
             logger.error("Failed to create success response", e);
             return "{\"jsonrpc\":\"2.0\",\"result\":{\"message\":\"Success\"},\"id\":null}";
         }
+    }
+
+    private final Map<String, FluxSink<String>> sessionSinks = new ConcurrentHashMap<>();
+
+    /**
+     * Creates a message stream for SSE connections
+     * This method supports the GET endpoint for cf-mcp-client SSE connections
+     */
+    public Flux<String> getMessageStream(String sessionId) {
+        logger.info("Creating message stream for session: {}", sessionId);
+
+        // Explicit type parameter to avoid compilation errors
+        return Flux.<String>create(sink -> {
+                    // Store the sink for this session
+                    sessionSinks.put(sessionId, sink);
+
+                    // Send initial connection event (required by cf-mcp-client)
+                    String connectionEvent = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":null}";
+                    sink.next(connectionEvent);
+
+                    // Set up periodic heartbeat to keep connection alive
+                    Disposable heartbeat = Flux.interval(Duration.ofSeconds(30))
+                            .subscribe(tick -> {
+                                if (!sink.isCancelled()) {
+                                    String heartbeatEvent = "{\"jsonrpc\":\"2.0\",\"method\":\"heartbeat\",\"params\":{\"timestamp\":\"" +
+                                            Instant.now().toString() + "\"}}";
+                                    sink.next(heartbeatEvent);
+                                }
+                            });
+
+                    // Handle cleanup when client disconnects
+                    sink.onDispose(() -> {
+                        logger.info("SSE session {} disconnected", sessionId);
+                        sessionSinks.remove(sessionId);
+                        heartbeat.dispose();
+                    });
+
+                    // Handle errors
+                    sink.onCancel(() -> {
+                        logger.info("SSE session {} cancelled", sessionId);
+                        sessionSinks.remove(sessionId);
+                        heartbeat.dispose();
+                    });
+                })
+                .doOnSubscribe(subscription -> {
+                    logger.info("SSE stream subscribed for session: {}", sessionId);
+                })
+                .doOnTerminate(() -> {
+                    logger.info("SSE stream terminated for session: {}", sessionId);
+                    sessionSinks.remove(sessionId);
+                });
+    }
+
+    /**
+     * Send a message to a specific SSE session
+     */
+    public boolean sendToSession(String sessionId, String message) {
+        FluxSink<String> sink = sessionSinks.get(sessionId);
+        if (sink != null && !sink.isCancelled()) {
+            try {
+                sink.next(message);
+                return true;
+            } catch (Exception e) {
+                logger.error("Error sending message to session {}: {}", sessionId, e.getMessage());
+                sessionSinks.remove(sessionId);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Broadcast a message to all active SSE sessions
+     */
+    public int broadcastToAllSessions(String message) {
+        int sentCount = 0;
+        // Create a copy to avoid concurrent modification
+        Map<String, FluxSink<String>> sessionsCopy = new ConcurrentHashMap<>(sessionSinks);
+
+        for (Map.Entry<String, FluxSink<String>> entry : sessionsCopy.entrySet()) {
+            String sessionId = entry.getKey();
+            FluxSink<String> sink = entry.getValue();
+
+            if (!sink.isCancelled()) {
+                try {
+                    sink.next(message);
+                    sentCount++;
+                } catch (Exception e) {
+                    logger.error("Error broadcasting to session {}: {}", sessionId, e.getMessage());
+                    sessionSinks.remove(sessionId);
+                }
+            } else {
+                // Clean up cancelled sinks
+                sessionSinks.remove(sessionId);
+            }
+        }
+        return sentCount;
+    }
+
+    /**
+     * Get the number of active SSE sessions
+     */
+    public int getActiveSessionCount() {
+        // Clean up any cancelled sinks and return accurate count
+        sessionSinks.entrySet().removeIf(entry -> entry.getValue().isCancelled());
+        return sessionSinks.size();
+    }
+
+    /**
+     * Close a specific SSE session
+     */
+    public void closeSession(String sessionId) {
+        FluxSink<String> sink = sessionSinks.remove(sessionId);
+        if (sink != null && !sink.isCancelled()) {
+            try {
+                sink.complete();
+            } catch (Exception e) {
+                logger.error("Error closing session {}: {}", sessionId, e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Close all SSE sessions
+     */
+    public void closeAllSessions() {
+        for (Map.Entry<String, FluxSink<String>> entry : sessionSinks.entrySet()) {
+            try {
+                FluxSink<String> sink = entry.getValue();
+                if (!sink.isCancelled()) {
+                    sink.complete();
+                }
+            } catch (Exception e) {
+                logger.error("Error closing session {}: {}", entry.getKey(), e.getMessage());
+            }
+        }
+        sessionSinks.clear();
     }
 }
