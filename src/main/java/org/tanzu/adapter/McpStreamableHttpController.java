@@ -22,7 +22,7 @@ import java.util.Map;
  * security validation, and protocol compliance.
  */
 @RestController
-@RequestMapping("/")
+@RequestMapping("/mcp")
 public class McpStreamableHttpController {
 
     private static final Logger logger = LoggerFactory.getLogger(McpStreamableHttpController.class);
