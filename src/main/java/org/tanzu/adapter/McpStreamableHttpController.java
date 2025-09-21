@@ -10,6 +10,8 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Flux;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.Map;
 
@@ -20,19 +22,19 @@ import java.util.Map;
  * security validation, and protocol compliance.
  */
 @RestController
-@RequestMapping("/mcp")
+@RequestMapping("/")
 public class McpStreamableHttpController {
 
     private static final Logger logger = LoggerFactory.getLogger(McpStreamableHttpController.class);
-
-    // Define NDJSON media type for streamable responses
-    public static final String APPLICATION_NDJSON_VALUE = "application/x-ndjson";
 
     @Autowired
     private StreamableBridge streamableBridge;
 
     @Autowired
     private SecurityValidator securityValidator;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
 
 
@@ -81,6 +83,17 @@ public class McpStreamableHttpController {
                     .body(Flux.just(createErrorResponse("MCP Server is not available")));
         }
 
+        // Check if this is a notification (no id field) for proper HTTP status code
+        boolean isNotification = false;
+        try {
+            JsonNode messageNode = objectMapper.readTree(jsonRpcMessage);
+            isNotification = !messageNode.has("id") || messageNode.get("id").isNull();
+            logger.debug("Message is notification: {}", isNotification);
+        } catch (Exception e) {
+            logger.warn("Failed to parse JSON-RPC message for notification detection: {}", e.getMessage());
+            // If we can't parse, assume it's a regular request
+        }
+
         // Process message using StreamableBridge for streaming
         Flux<String> responseStream = streamableBridge.processRequest(jsonRpcMessage);
 
@@ -89,7 +102,11 @@ public class McpStreamableHttpController {
 
         logger.info("Responding with Content-Type: {}", responseContentType);
 
-        return ResponseEntity.ok()
+        // Return 202 Accepted for notifications, 200 OK for regular requests
+        HttpStatus responseStatus = isNotification ? HttpStatus.ACCEPTED : HttpStatus.OK;
+        logger.debug("Responding with HTTP status: {}", responseStatus);
+
+        return ResponseEntity.status(responseStatus)
                 .contentType(responseContentType)
                 .body(responseStream);
     }
@@ -185,6 +202,7 @@ public class McpStreamableHttpController {
 
     /**
      * Determines the appropriate content type based on the Accept header.
+     * Following MCP specification: application/json or text/event-stream only.
      *
      * @param acceptHeader The Accept header from the request
      * @return The appropriate MediaType for the response
@@ -195,15 +213,11 @@ public class McpStreamableHttpController {
             return MediaType.APPLICATION_JSON;
         }
 
-        // Check what the client accepts
-        if (acceptHeader.contains("application/json")) {
-            return MediaType.APPLICATION_JSON;
-        } else if (acceptHeader.contains("text/event-stream")) {
+        // Check what the client accepts - only standard MCP types
+        if (acceptHeader.contains("text/event-stream")) {
             return MediaType.TEXT_EVENT_STREAM;
-        } else if (acceptHeader.contains("application/x-ndjson")) {
-            return MediaType.parseMediaType(APPLICATION_NDJSON_VALUE);
         } else {
-            // Default to JSON for compatibility
+            // Default to JSON for compatibility (MCP standard)
             return MediaType.APPLICATION_JSON;
         }
     }

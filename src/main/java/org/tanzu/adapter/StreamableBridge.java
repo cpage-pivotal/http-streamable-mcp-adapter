@@ -51,9 +51,9 @@ public class StreamableBridge {
      *
      * Core flow as per design document:
      * 1. Validate JSON-RPC message
-     * 2. Create correlation context
-     * 3. Send to MCP Server via STDIO
-     * 4. Stream responses for this request
+     * 2. Check if notification (no id field)
+     * 3. For notifications: Send to MCP server and return success immediately
+     * 4. For requests: Create correlation context, send to MCP server, stream responses
      *
      * @param jsonRpcMessage The JSON-RPC message from the client
      * @return Flux of JSON response strings
@@ -63,22 +63,58 @@ public class StreamableBridge {
             // 1. Validate JSON-RPC message
             validateJsonRpcMessage(jsonRpcMessage);
 
-            // 2. Create correlation context
-            String correlationId = requestContextManager.createRequestContext(jsonRpcMessage);
+            // 2. Check if this is a notification (no id field)
+            boolean isNotification = isNotification(jsonRpcMessage);
 
-            // 3. Send to MCP Server via STDIO
-            mcpServerProcess.sendMessage(jsonRpcMessage);
+            if (isNotification) {
+                // 3a. For notifications: Send to MCP server but don't wait for response
+                logger.debug("Processing notification - sending to MCP server without waiting for response");
+                mcpServerProcess.sendMessage(jsonRpcMessage);
 
-            return correlationId;
+                // Return a special marker to indicate notification was processed
+                return "NOTIFICATION_PROCESSED";
+            } else {
+                // 3b. For requests: Create correlation context
+                String correlationId = requestContextManager.createRequestContext(jsonRpcMessage);
+
+                // Send to MCP Server via STDIO
+                mcpServerProcess.sendMessage(jsonRpcMessage);
+
+                return correlationId;
+            }
         })
-        .flatMapMany(correlationId -> {
-            // 4. Stream responses for this request
-            return streamResponsesForRequest(correlationId);
+        .flatMapMany(result -> {
+            // 4. Handle result based on message type
+            if ("NOTIFICATION_PROCESSED".equals(result)) {
+                // Notification was sent to MCP server - return empty stream
+                // The HTTP response (202 Accepted) is handled by the controller
+                return Flux.empty();
+            } else {
+                // This is a correlation ID for a request - stream responses
+                return streamResponsesForRequest(result.toString());
+            }
         })
         .onErrorResume(error -> {
             logger.error("Error processing streamable request: {}", jsonRpcMessage, error);
             return Flux.just(createErrorResponse(error.getMessage(), null));
         });
+    }
+
+    /**
+     * Determines if a JSON-RPC message is a notification (no id field).
+     *
+     * @param jsonRpcMessage The JSON-RPC message to check
+     * @return true if this is a notification, false if it's a request
+     */
+    private boolean isNotification(String jsonRpcMessage) {
+        try {
+            JsonNode messageNode = objectMapper.readTree(jsonRpcMessage);
+            return !messageNode.has("id") || messageNode.get("id").isNull();
+        } catch (Exception e) {
+            logger.warn("Failed to parse JSON-RPC message for notification detection: {}", e.getMessage());
+            // If we can't parse, assume it's a regular request to be safe
+            return false;
+        }
     }
 
     /**
@@ -294,7 +330,7 @@ public class StreamableBridge {
                     sessionSinks.put(sessionId, sink);
 
                     // Send initial connection event (required by cf-mcp-client)
-                    String connectionEvent = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":null}";
+                    String connectionEvent = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}";
                     sink.next(connectionEvent);
 
                     // Set up periodic heartbeat to keep connection alive
